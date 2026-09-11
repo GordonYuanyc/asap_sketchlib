@@ -11,8 +11,8 @@
 //! the f64 extremes, and geometries at one, at a prime and at a power of two.
 
 use asap_sketchlib::{
-    Bloom, Count, CountMin, DDSketch, DataInput, DefaultXxHasher, ErtlMLE, FastPath, HyperLogLog,
-    KLL, KLLDynamic, RegularPath, SpaceSaving, Vector2D,
+    Bloom, CMSHeap, CSHeap, Coco, Count, CountMin, DDSketch, DataInput, DefaultXxHasher, Elastic,
+    ErtlMLE, FastPath, HyperLogLog, KLL, KLLDynamic, RegularPath, SpaceSaving, Vector2D,
 };
 use proptest::prelude::*;
 
@@ -217,6 +217,117 @@ proptest! {
         }
 
         round_trip!(Bloom, sketch, bloom_bits);
+    }
+
+    // ===== Heap-backed matrix payloads, at edge geometries and budgets =====
+
+    #[test]
+    fn cms_heap_round_trips_at_edge_geometries(
+        rows in edge_dimension(),
+        cols in edge_dimension(),
+        top_k in 0usize..16,
+        stream in keys(200),
+    ) {
+        type Wrapped = CMSHeap<Vector2D<i64>, FastPath>;
+        let mut sketch = Wrapped::new(rows, cols, top_k);
+        for k in &stream {
+            sketch.insert(&DataInput::U64(*k));
+        }
+
+        round_trip!(
+            Wrapped,
+            sketch,
+            |s: &Wrapped| (0..PROBE_KEYS as u64)
+                .map(|k| s.estimate(&DataInput::U64(k)))
+                .collect::<Vec<_>>(),
+            |s: &Wrapped| {
+                let mut held: Vec<(String, i64)> = s
+                    .heap()
+                    .heap()
+                    .iter()
+                    .map(|item| (format!("{:?}", item.key), item.count))
+                    .collect();
+                held.sort();
+                held
+            },
+        );
+    }
+
+    #[test]
+    fn cs_heap_round_trips_at_edge_geometries(
+        rows in edge_dimension(),
+        cols in edge_dimension(),
+        top_k in 0usize..16,
+        stream in keys(200),
+    ) {
+        type Wrapped = CSHeap<Vector2D<i64>, RegularPath>;
+        let mut sketch = Wrapped::new(rows, cols, top_k);
+        for k in &stream {
+            sketch.insert(&DataInput::U64(*k));
+        }
+
+        round_trip!(
+            Wrapped,
+            sketch,
+            |s: &Wrapped| (0..PROBE_KEYS as u64)
+                .map(|k| s.estimate(&DataInput::U64(k)))
+                .collect::<Vec<_>>(),
+            |s: &Wrapped| {
+                let mut held: Vec<(String, i64)> = s
+                    .heap()
+                    .heap()
+                    .iter()
+                    .map(|item| (format!("{:?}", item.key), item.count))
+                    .collect();
+                held.sort();
+                held
+            },
+        );
+    }
+
+    // ===== Keyed-bucket payloads =====
+
+    #[test]
+    fn coco_round_trips_at_edge_geometries(
+        width in edge_dimension(),
+        depth in edge_dimension(),
+        stream in keys(200),
+    ) {
+        type C = Coco<DefaultXxHasher>;
+        let mut sketch = C::init_with_size(width, depth);
+        for k in &stream {
+            sketch.insert(&format!("flow-{k}"), 1);
+        }
+
+        round_trip!(
+            C,
+            sketch,
+            |s: &C| (0..PROBE_KEYS as u64)
+                .map(|k| s.estimate_key(&format!("flow-{k}")))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn elastic_round_trips_at_edge_geometries(
+        buckets in edge_dimension(),
+        light_rows in edge_dimension(),
+        light_cols in edge_dimension(),
+        stream in keys(200),
+    ) {
+        type E = Elastic<DefaultXxHasher>;
+        let mut sketch = E::init_with_dimensions(buckets as i32, light_rows, light_cols);
+        for k in &stream {
+            sketch.insert(format!("flow-{k}"));
+        }
+
+        round_trip!(
+            E,
+            sketch,
+            |s: &E| (0..PROBE_KEYS as u64)
+                .map(|k| s.query(format!("flow-{k}")))
+                .collect::<Vec<_>>(),
+        );
     }
 
     // ===== Register and counter payloads, empty streams included =====
