@@ -153,11 +153,12 @@ proptest! {
             sketch.update(v);
         }
 
-        // The quantile probe is absent on purpose. `KLLDynamic::quantile`
-        // sorts with `partial_cmp(..).unwrap()`, so a NaN anywhere in the
-        // stream panics the query: `init_kll_with_seed(1, 1)`, `update(&0.0)`,
-        // `update(&f64::NAN)`, `quantile(0.5)`. `KLL` answers the same input.
-        round_trip!(KLLDynamic<f64>, sketch, |s: &KLLDynamic<f64>| s.count());
+        round_trip!(
+            KLLDynamic<f64>,
+            sketch,
+            |s: &KLLDynamic<f64>| s.count(),
+            |s: &KLLDynamic<f64>| QUANTILES.iter().map(|q| s.quantile(*q).to_bits()).collect::<Vec<_>>(),
+        );
     }
 
     // ===== Matrix payloads at edge geometries, empty streams included =====
