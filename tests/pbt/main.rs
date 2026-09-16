@@ -15,10 +15,17 @@ mod count_min;
 mod count_sketch;
 mod ddsketch;
 mod elastic;
+mod fold;
 mod heaps;
 mod hll;
 mod kll;
 mod kll_dynamic;
 mod octo_delta;
+mod set_aggregator;
 mod space_saving;
 mod topk_wrappers;
+
+#[cfg(feature = "experimental")]
+mod count_min_hll;
+#[cfg(feature = "experimental")]
+mod kmv;
