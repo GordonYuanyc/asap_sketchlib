@@ -7,7 +7,7 @@
 //! corruption is not.
 //!
 //! What the generators aim at is the input the fixed streams in
-//! `tests/e2e_wire.rs` never reach: empty sketches, NaN and the infinities,
+//! `tests/e2e/wire.rs` never reach: empty sketches, NaN and the infinities,
 //! the f64 extremes, and geometries at one, at a prime and at a power of two.
 
 use asap_sketchlib::{
