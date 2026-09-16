@@ -6,9 +6,13 @@
 //! model states only what the paper fixes, because an implementation is
 //! entitled to the other option.
 //!
-//! `estimate` is a deterministic function of the registers, so no model of it
-//! can be independent of the code it checks. Its laws here are relations
-//! between estimates instead: a permutation, a uniform shift, a single rise.
+//! For `Classic` and `ErtlMLE`, `estimate` is a deterministic function of the
+//! registers, so no model of it can be independent of the code it checks. Its
+//! laws here are relations between estimates instead: a permutation, a uniform
+//! shift, a single rise. The HIP estimator is the exception - its estimate is
+//! an accumulator over arrivals, and the increment each arrival owes is fixed
+//! in closed form by the registers that preceded it, so that one is stated as
+//! an equality.
 //!
 //! Each law is written once inside a macro and expanded per shape, so a failure
 //! names its own precision and variant. Insertion expands over precision alone:
@@ -16,13 +20,15 @@
 //! `impl<Variant, Registers, H>` block, so the two variants share one
 //! monomorphization. Estimation expands over both.
 //!
-//! The merge laws cover `HllSketch`, the portable representation with a
-//! register array of its own.
+//! The merge laws cover both representations: `HyperLogLogImpl` itself and
+//! `HllSketch`, the portable one with a register array of its own.
 //!
 //! Flajolet, Fusy, Gandouet, Meunier, AofA '07.
 
+use crate::support::keys;
+use asap_sketchlib::message_pack_format::MessagePackCodec;
 use asap_sketchlib::sketches::hll::{HyperLogLogHIPImpl, HyperLogLogImpl};
-use asap_sketchlib::{Classic, DataInput, ErtlMLE, HllSketch, HllVariant};
+use asap_sketchlib::{Classic, DataInput, ErtlMLE, HllSketch, HllVariant, HyperLogLog};
 use proptest::prelude::*;
 
 asap_sketchlib::impl_hll_bucket_list!(BucketsP4, 4, 1_usize << 4);
@@ -101,6 +107,24 @@ fn bucket_and_values(m: usize) -> impl Strategy<Value = (usize, Vec<u8>)> {
             values.sort_unstable();
             (bucket, values)
         })
+}
+
+/// `sum(2^-M[j])`, the denominator of the HIP increment. Each term is a power
+/// of two, so every partial sum is a multiple of `2^-MAX_LEADING_ZERO` under
+/// `2^10` and the whole sum is exact in f64.
+fn inverse_probability_sum(registers: &[u8]) -> f64 {
+    registers.iter().map(|&v| 1.0 / ((1_u64 << v) as f64)).sum()
+}
+
+/// A run of placements long enough that the increments have to spread apart:
+/// the sum falls as registers fill, so a run of this length separates the HIP
+/// estimate from the count of upgrades by more than the estimator's truncation
+/// to `usize` can hide.
+fn upgrade_plan(m: usize) -> impl Strategy<Value = Vec<(usize, u8)>> {
+    prop::collection::vec(
+        (0..m, 1u8..=MAX_LEADING_ZERO),
+        m.min(192)..=(2 * m).min(384),
+    )
 }
 
 macro_rules! insertion_laws {
@@ -408,10 +432,11 @@ merge_laws!(merge_p6, BucketsP6);
 merge_laws!(merge_p8, BucketsP8);
 merge_laws!(merge_p10, BucketsP10);
 
-// `HyperLogLogHIPImpl` exposes no registers and no merge, so its laws are
-// stated on `estimate` alone. That estimate accumulates one increment per
-// register upgrade, which makes it a function of the arrival order and not of
-// the registers - the opposite of the law the other two variants obey.
+// `HyperLogLogHIPImpl` exposes no merge and keeps its registers private, so
+// the register state reaches these laws through the ASAPv1 envelope. That
+// estimate accumulates one increment per register upgrade, which makes it a
+// function of the arrival order and not of the registers alone - the opposite
+// of the law the other two variants obey.
 macro_rules! hip_laws {
     ($name:ident, $buckets:ty) => {
         mod $name {
@@ -420,6 +445,16 @@ macro_rules! hip_laws {
             type S = HyperLogLogHIPImpl<$buckets>;
             const M: usize = <$buckets>::NUM_REGISTERS;
             const P: u32 = <$buckets>::PRECISION as u32;
+
+            /// The registers, read back through the wire format. The struct
+            /// holds them privately behind the `kxq0`/`kxq1` accumulators, and
+            /// those accumulators are what the increment law checks, so the
+            /// envelope is the one view of the registers that stays independent
+            /// of it.
+            fn registers_of(sketch: &S) -> Vec<u8> {
+                let bytes = sketch.to_msgpack().expect("encode");
+                HllSketch::from_msgpack(&bytes).expect("decode").registers
+            }
 
             #[test]
             fn the_empty_sketch_estimates_zero() {
@@ -482,6 +517,43 @@ macro_rules! hip_laws {
                         "{} values into register {}: ascending {} against descending {}",
                         values.len(), bucket, ascending.estimate(), descending.estimate()
                     );
+                }
+            }
+
+            proptest! {
+                #![proptest_config(ProptestConfig::with_cases(24))]
+
+                // The HIP increment: an arrival that raises a register adds
+                // `m / sum(2^-M[j])` over the register state M that preceded
+                // it, and an arrival that raises nothing adds nothing. Lang,
+                // arXiv:1708.06839.
+                //
+                // Both sides are exact in f64 - the sum, the division, and the
+                // running total are the same operations in the same order - so
+                // the truncation to `usize` is compared, not tolerated.
+                #[test]
+                fn every_upgrade_adds_m_over_the_inverse_probability_sum(
+                    plan in upgrade_plan(M),
+                ) {
+                    let mut sketch = S::new();
+                    let mut before = registers_of(&sketch);
+                    let mut expected = 0.0_f64;
+
+                    for (step, (bucket, value)) in plan.iter().enumerate() {
+                        sketch.insert_with_hash(hash_placing(P, *bucket, *value));
+                        let after = registers_of(&sketch);
+                        if after != before {
+                            expected += M as f64 / inverse_probability_sum(&before);
+                        }
+
+                        prop_assert_eq!(
+                            sketch.estimate(),
+                            expected as usize,
+                            "step {}, register {} to {}: {} against {}",
+                            step, bucket, value, sketch.estimate(), expected
+                        );
+                        before = after;
+                    }
                 }
             }
         }
@@ -552,5 +624,53 @@ proptest! {
         merged.merge(&HllSketch::new(HllVariant::Regular, precision)).expect("merge");
 
         prop_assert_eq!(&merged.registers, &base.registers);
+    }
+}
+
+fn hll_variant() -> impl Strategy<Value = HllVariant> {
+    prop_oneof![
+        Just(HllVariant::Regular),
+        Just(HllVariant::Datafusion),
+        Just(HllVariant::Hip),
+    ]
+}
+
+proptest! {
+    // ===== Wire =====
+
+    #[test]
+    fn hll_round_trip_preserves_registers(
+        variant in hll_variant(),
+        precision in 4u32..14,
+        items in byte_items(64),
+    ) {
+        let mut s = HllSketch::new(variant, precision);
+        for item in &items {
+            s.update(item);
+        }
+
+        let bytes = s.to_msgpack().expect("encode");
+        let restored = HllSketch::from_msgpack(&bytes).expect("decode");
+
+        prop_assert_eq!(restored.variant, s.variant);
+        prop_assert_eq!(restored.precision, s.precision);
+        prop_assert_eq!(&restored.registers, &s.registers);
+        prop_assert_eq!(restored.estimate(), s.estimate());
+    }
+
+    #[test]
+    fn hyperloglog_round_trips_including_the_empty_sketch(stream in keys(400)) {
+        type Hll = HyperLogLog<ErtlMLE>;
+        let mut sketch = Hll::new();
+        for k in &stream {
+            sketch.insert(&DataInput::U64(*k));
+        }
+
+        round_trip!(
+            Hll,
+            sketch,
+            |s: &Hll| s.registers_as_slice().to_vec(),
+            |s: &Hll| s.estimate(),
+        );
     }
 }

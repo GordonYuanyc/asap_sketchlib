@@ -2,14 +2,23 @@
 //! `proptest` against oracles derived independently of the implementation.
 //!
 //! One target rather than one per file, so `cargo test --test pbt` runs
-//! the whole suite and the library is linked once.
+//! the whole suite and the library is linked once. One file per sketch, so a
+//! law lives next to the family it constrains; what more than one sketch
+//! needs lives in `support`.
 
-mod asapv1_roundtrip;
-mod heap_invariants;
+#[macro_use]
+mod support;
+
+mod bloom;
+mod coco;
+mod count_min;
+mod count_sketch;
+mod ddsketch;
+mod elastic;
+mod heaps;
 mod hll;
-mod merge_algebra;
+mod kll;
+mod kll_dynamic;
 mod octo_delta;
-mod path_equivalence;
-mod reference_models;
-mod space_saving_bounds;
-mod wire_roundtrip;
+mod space_saving;
+mod topk_wrappers;
