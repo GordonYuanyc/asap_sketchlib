@@ -14,12 +14,14 @@ mod coco;
 mod count_min;
 mod count_sketch;
 mod ddsketch;
+mod ensemble;
 mod elastic;
 mod fold;
 mod heaps;
 mod hll;
 mod kll;
 mod kll_dynamic;
+mod nitro;
 mod octo_delta;
 mod set_aggregator;
 mod space_saving;
@@ -29,3 +31,7 @@ mod topk_wrappers;
 mod count_min_hll;
 #[cfg(feature = "experimental")]
 mod kmv;
+#[cfg(feature = "experimental")]
+mod microscope;
+#[cfg(feature = "experimental")]
+mod uniform_sampling;
