@@ -14,11 +14,13 @@ mod coco;
 mod count_min;
 mod count_sketch;
 mod ddsketch;
-mod ensemble;
 mod elastic;
+mod ensemble;
+mod exponential_histogram;
 mod fold;
 mod heaps;
 mod hll;
+mod hydra;
 mod kll;
 mod kll_dynamic;
 mod nitro;
@@ -26,6 +28,8 @@ mod octo_delta;
 mod set_aggregator;
 mod space_saving;
 mod topk_wrappers;
+mod univmon;
+mod univmon_q;
 
 #[cfg(feature = "experimental")]
 mod count_min_hll;
