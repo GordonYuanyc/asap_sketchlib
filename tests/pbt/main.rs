@@ -6,6 +6,7 @@
 
 mod asapv1_roundtrip;
 mod heap_invariants;
+mod hll;
 mod merge_algebra;
 mod octo_delta;
 mod path_equivalence;

@@ -4,9 +4,7 @@
 //! Where f64 counters or randomized compaction make exactness
 //! unavailable, the law is stated as a bound instead.
 
-use asap_sketchlib::{
-    Bloom, CountMinSketch, CountSketch, DataInput, DdSketch, HllSketch, HllVariant, KllSketch,
-};
+use asap_sketchlib::{Bloom, CountMinSketch, CountSketch, DataInput, DdSketch, KllSketch};
 use proptest::prelude::*;
 
 /// Relative tolerance absorbing f64 summation-order differences
@@ -29,10 +27,6 @@ fn keyed_updates(max: usize) -> impl Strategy<Value = Vec<(String, f64)>> {
     prop::collection::vec(("[a-z]{1,8}", 1.0f64..10_000.0), 0..max)
 }
 
-fn byte_items(max: usize) -> impl Strategy<Value = Vec<Vec<u8>>> {
-    prop::collection::vec(prop::collection::vec(any::<u8>(), 1..16), 0..max)
-}
-
 fn cms_of(rows: usize, cols: usize, updates: &[(String, f64)]) -> CountMinSketch {
     let mut s = CountMinSketch::new(rows, cols);
     for (k, v) in updates {
@@ -45,14 +39,6 @@ fn cs_of(rows: usize, cols: usize, updates: &[(String, f64)]) -> CountSketch {
     let mut s = CountSketch::new(rows, cols);
     for (k, v) in updates {
         s.update(k, *v);
-    }
-    s
-}
-
-fn hll_of(precision: u32, items: &[Vec<u8>]) -> HllSketch {
-    let mut s = HllSketch::new(HllVariant::Regular, precision);
-    for i in items {
-        s.update(i);
     }
     s
 }
@@ -189,54 +175,6 @@ proptest! {
         let streamed = cs_of(rows, cols, &concatenated);
 
         prop_assert!(matrices_close(merged.sketch(), streamed.sketch()));
-    }
-
-    // ===== HyperLogLog =====
-
-    #[test]
-    fn hll_register_merge_is_commutative_and_idempotent(
-        precision in 4u32..12,
-        a in byte_items(50),
-        b in byte_items(50),
-    ) {
-        let mut ab = hll_of(precision, &a);
-        ab.merge(&hll_of(precision, &b)).expect("merge");
-        let mut ba = hll_of(precision, &b);
-        ba.merge(&hll_of(precision, &a)).expect("merge");
-
-        prop_assert_eq!(&ab.registers, &ba.registers);
-
-        let before = ab.registers.clone();
-        let again = ab.clone();
-        ab.merge(&again).expect("merge");
-        prop_assert_eq!(&ab.registers, &before);
-    }
-
-    #[test]
-    fn hll_merge_equals_streaming_the_concatenation(
-        precision in 4u32..12,
-        a in byte_items(50),
-        b in byte_items(50),
-    ) {
-        let mut merged = hll_of(precision, &a);
-        merged.merge(&hll_of(precision, &b)).expect("merge");
-
-        let concatenated: Vec<_> = a.iter().chain(b.iter()).cloned().collect();
-        let streamed = hll_of(precision, &concatenated);
-
-        prop_assert_eq!(&merged.registers, &streamed.registers);
-    }
-
-    #[test]
-    fn hll_empty_is_a_merge_identity(
-        precision in 4u32..12,
-        a in byte_items(50),
-    ) {
-        let base = hll_of(precision, &a);
-        let mut merged = base.clone();
-        merged.merge(&HllSketch::new(HllVariant::Regular, precision)).expect("merge");
-
-        prop_assert_eq!(&merged.registers, &base.registers);
     }
 
     // ===== DDSketch =====

@@ -6,78 +6,11 @@
 //! index a register, how a bucket maps to a rank - the model states only what
 //! the paper fixes, because an implementation is entitled to the other option.
 //!
-//! `estimate` is a deterministic function of the registers, so no model of it
-//! can be independent of the code it checks. Its laws here are relations
-//! between estimates instead: a permutation, a uniform shift, a single rise.
-//!
-//! * HyperLogLog: Flajolet, Fusy, Gandouet, Meunier, AofA '07.
 //! * DDSketch: Masson, Rim, Lee, VLDB '19.
 //! * Bloom: Bloom, CACM '70.
 
-use asap_sketchlib::sketches::hll::HyperLogLogImpl;
-use asap_sketchlib::{Bloom, Classic, DDSketch, DataInput, HyperLogLog};
+use asap_sketchlib::{Bloom, DDSketch, DataInput};
 use proptest::prelude::*;
-
-// 256 registers, small enough that a few hundred keys straddle the 5m/2 the
-// small range correction switches at. The default P14 puts that boundary past
-// forty thousand distinct keys.
-asap_sketchlib::impl_hll_bucket_list!(HllBucketListP8, 8, 1_usize << 8);
-type HllP8 = HyperLogLogImpl<Classic, HllBucketListP8>;
-
-/// Registers in the default sketch, well above the 128 at which the paper's
-/// alpha formula takes over from its three tabulated constants.
-fn hll_of(keys: &[u64]) -> HyperLogLog<Classic> {
-    let mut s = HyperLogLog::<Classic>::new();
-    for k in keys {
-        s.insert(&DataInput::U64(*k));
-    }
-    s
-}
-
-/// Ranks stay in this band so the sum of `2^-r` over 256 registers is exact in
-/// f64: a 40-bit span plus 8 bits of count sits inside the 53-bit significand,
-/// so the order the terms are added in cannot reach the result.
-const MAX_RANK: u8 = 40;
-
-/// The hash that drives `bucket` to `rank`: the top `PRECISION` bits select the
-/// register, the highest set bit below them fixes the rank.
-fn hash_placing(bucket: usize, rank: u8) -> u64 {
-    let payload_bits = 64 - HllBucketListP8::PRECISION as u32;
-    ((bucket as u64) << payload_bits) | (1u64 << (payload_bits - rank as u32))
-}
-
-/// A sketch whose registers are exactly `target`, built through the public
-/// insertion path. The assertion holds the hash split in place: a different one
-/// fails here rather than handing the laws below some other state.
-fn sketch_with_registers(target: &[u8]) -> HllP8 {
-    let mut sketch = HllP8::new();
-    for (bucket, &rank) in target.iter().enumerate() {
-        if rank != 0 {
-            sketch.insert_with_hash(hash_placing(bucket, rank));
-        }
-    }
-    assert_eq!(sketch.registers_as_slice(), target, "crafted registers");
-    sketch
-}
-
-/// Register arrays with no zero entry: the estimator's raw branch, the one the
-/// small range correction cannot fire in.
-fn dense_registers() -> impl Strategy<Value = Vec<u8>> {
-    prop::collection::vec(1u8..=MAX_RANK, HllBucketListP8::NUM_REGISTERS)
-}
-
-fn registers_and_permutation() -> impl Strategy<Value = (Vec<u8>, Vec<u8>)> {
-    prop::collection::vec(0u8..=MAX_RANK, HllBucketListP8::NUM_REGISTERS)
-        .prop_flat_map(|v| (Just(v.clone()), Just(v).prop_shuffle()))
-}
-
-// Zero registers put the estimator in linear counting, where `m * ln(m/m)` is
-// zero at every precision.
-#[test]
-fn hll_the_empty_sketch_estimates_zero() {
-    assert_eq!(HllP8::new().estimate(), 0);
-    assert_eq!(HyperLogLog::<Classic>::new().estimate(), 0);
-}
 
 fn keys(max: usize) -> impl Strategy<Value = Vec<u64>> {
     prop::collection::vec(any::<u64>(), 0..max)
@@ -115,102 +48,6 @@ fn sorted(values: &[f64]) -> Vec<f64> {
 }
 
 proptest! {
-    // ===== HyperLogLog =====
-
-    // The registers reach the estimate as a multiset: what the formula reads is
-    // the sum of `2^-M[j]`, never the position a register sits at.
-    #[test]
-    fn hll_estimate_is_invariant_under_permuting_the_registers(
-        (registers, permuted) in registers_and_permutation(),
-    ) {
-        prop_assert_eq!(
-            sketch_with_registers(&permuted).estimate(),
-            sketch_with_registers(&registers).estimate(),
-        );
-    }
-
-    // Raising every register by one halves the sum of `2^-M[j]`, so the raw
-    // indicator doubles. `estimate` truncates, which leaves one unit of slack.
-    #[test]
-    fn hll_raising_every_register_by_one_doubles_the_estimate(
-        registers in dense_registers(),
-    ) {
-        let base = sketch_with_registers(&registers).estimate();
-        let raised: Vec<u8> = registers.iter().map(|r| r + 1).collect();
-        let doubled = sketch_with_registers(&raised).estimate();
-
-        prop_assert!(
-            doubled == 2 * base || doubled == 2 * base + 1,
-            "every register raised by one: {} against a base of {}",
-            doubled,
-            base
-        );
-    }
-
-    // A higher register contributes less to the sum the estimate divides by.
-    #[test]
-    fn hll_estimate_never_falls_when_a_register_rises(
-        registers in dense_registers(),
-        index in 0..HllBucketListP8::NUM_REGISTERS,
-        lift in 1u8..8,
-    ) {
-        let before = sketch_with_registers(&registers).estimate();
-        let mut raised = registers.clone();
-        raised[index] = (raised[index] + lift).min(MAX_RANK);
-        let after = sketch_with_registers(&raised).estimate();
-
-        prop_assert!(
-            after >= before,
-            "register {} at {}: {} fell from {}",
-            index,
-            raised[index],
-            after,
-            before
-        );
-    }
-
-    #[test]
-    fn hll_registers_ignore_duplicates(stream in keys(600)) {
-        let mut deduped = stream.clone();
-        deduped.sort_unstable();
-        deduped.dedup();
-
-        let (full, unique) = (hll_of(&stream), hll_of(&deduped));
-        prop_assert_eq!(full.registers_as_slice(), unique.registers_as_slice());
-    }
-
-    #[test]
-    fn hll_registers_never_decrease(stream in keys(300)) {
-        let mut sketch = HyperLogLog::<Classic>::new();
-        let mut previous = sketch.registers_as_slice().to_vec();
-        for k in &stream {
-            sketch.insert(&DataInput::U64(*k));
-            let current = sketch.registers_as_slice();
-            prop_assert!(
-                current.iter().zip(&previous).all(|(now, before)| now >= before),
-                "a register fell after inserting {}", k
-            );
-            previous = current.to_vec();
-        }
-    }
-
-    #[test]
-    fn hll_one_arrival_raises_at_most_one_register(stream in keys(300)) {
-        let mut sketch = HyperLogLog::<Classic>::new();
-        let mut previous = sketch.registers_as_slice().to_vec();
-        for k in &stream {
-            sketch.insert(&DataInput::U64(*k));
-            let changed = sketch
-                .registers_as_slice()
-                .iter()
-                .zip(&previous)
-                .filter(|(now, before)| now != before)
-                .count();
-            prop_assert!(changed <= 1, "inserting {} moved {} registers", k, changed);
-            previous = sketch.registers_as_slice().to_vec();
-        }
-    }
-
     // ===== DDSketch =====
 
     #[test]

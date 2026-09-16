@@ -8,8 +8,8 @@
 //! would.
 
 use asap_sketchlib::{
-    Bloom, CMSHeap, CSHeap, Classic, Count, CountMin, DataInput, FastPath, HyperLogLog,
-    RegularPath, Vector2D, hash_for_matrix,
+    Bloom, CMSHeap, CSHeap, Count, CountMin, DataInput, FastPath, RegularPath, Vector2D,
+    hash_for_matrix,
 };
 use proptest::prelude::*;
 
@@ -121,22 +121,6 @@ proptest! {
         prop_assert_eq!(bloom_bits(&first), bloom_bits(&second));
     }
 
-    #[test]
-    fn hyperloglog_is_insensitive_to_stream_order(
-        (a, b) in stream_and_permutation(400),
-    ) {
-        let mut first = HyperLogLog::<Classic>::default();
-        let mut second = HyperLogLog::<Classic>::default();
-        for k in &a {
-            first.insert(&DataInput::U64(*k));
-        }
-        for k in &b {
-            second.insert(&DataInput::U64(*k));
-        }
-
-        prop_assert_eq!(first.registers_as_slice(), second.registers_as_slice());
-    }
-
     // ===== A weighted arrival must match repeating it =====
 
     #[test]
@@ -204,25 +188,6 @@ proptest! {
         let expected = cm_fast_cells(&by_loop);
         prop_assert_eq!(cm_fast_cells(&by_bulk), expected.clone());
         prop_assert_eq!(cm_fast_cells(&by_hashes), expected);
-    }
-
-    #[test]
-    fn hyperloglog_hashed_entry_point_matches_the_value_one(
-        keys in stream(400),
-    ) {
-        let mut by_value = HyperLogLog::<Classic>::default();
-        for k in &keys {
-            by_value.insert(&DataInput::U64(*k));
-        }
-
-        let hashes: Vec<u64> = keys
-            .iter()
-            .map(|k| HyperLogLog::<Classic>::canonical_hash(&DataInput::U64(*k)))
-            .collect();
-        let mut by_hash = HyperLogLog::<Classic>::default();
-        by_hash.insert_many_with_hashes(&hashes);
-
-        prop_assert_eq!(by_value.registers_as_slice(), by_hash.registers_as_slice());
     }
 
     // ===== A top-k wrapper must not disturb its inner matrix =====
